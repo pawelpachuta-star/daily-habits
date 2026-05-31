@@ -6,7 +6,6 @@
   <title>Daily Habits</title>
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#16a34a">
-  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Habits">
@@ -21,13 +20,713 @@
 </head>
 <body>
   <div id="root"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://cdn.jsdelivr.net/npm/htm@3/dist/htm.umd.js" crossorigin></script>
+
   <script>
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () =>
-        navigator.serviceWorker.register('sw.js').catch(() => {})
-      );
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('sw.js').catch(function() {});
+      });
     }
   </script>
-  <script type="module" src="js/app.js"></script>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // ── DB ───────────────────────────────────────────────────────────────────
+
+    var DB_NAME = 'daily-habits';
+    var DB_VERSION = 1;
+    var _db = null;
+
+    function req2p(r) {
+      return new Promise(function(res, rej) {
+        r.onsuccess = function() { res(r.result); };
+        r.onerror = function() { rej(r.error); };
+      });
+    }
+
+    function openDB() {
+      if (_db) return Promise.resolve(_db);
+      if (!window.indexedDB) return Promise.reject(new Error('IndexedDB not available'));
+      return new Promise(function(resolve, reject) {
+        var req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = function(e) {
+          var db = e.target.result;
+          if (!db.objectStoreNames.contains('habits')) {
+            var s = db.createObjectStore('habits', { keyPath: 'id' });
+            s.createIndex('order', 'order');
+          }
+          if (!db.objectStoreNames.contains('entries')) {
+            var s2 = db.createObjectStore('entries', { keyPath: ['habitId', 'date'] });
+            s2.createIndex('habitId', 'habitId');
+          }
+          if (!db.objectStoreNames.contains('meta')) {
+            db.createObjectStore('meta', { keyPath: 'key' });
+          }
+        };
+        req.onsuccess = function(e) { _db = e.target.result; resolve(_db); };
+        req.onerror = function() { reject(req.error); };
+      });
+    }
+
+    function tx(storeNames, mode) {
+      var names = Array.isArray(storeNames) ? storeNames : [storeNames];
+      return _db.transaction(names, mode || 'readonly');
+    }
+
+    function getHabits() {
+      return openDB().then(function() {
+        return req2p(tx('habits').objectStore('habits').getAll());
+      }).then(function(all) {
+        return all.sort(function(a, b) { return a.order - b.order; });
+      });
+    }
+
+    function saveHabit(habit) {
+      return openDB().then(function() {
+        return req2p(tx('habits', 'readwrite').objectStore('habits').put(habit));
+      });
+    }
+
+    function deleteHabit(id) {
+      return openDB().then(function() {
+        var t = tx(['habits', 'entries'], 'readwrite');
+        return req2p(t.objectStore('habits').delete(id)).then(function() {
+          return req2p(t.objectStore('entries').index('habitId').getAllKeys(id));
+        }).then(function(keys) {
+          var entriesStore = t.objectStore('entries');
+          return keys.reduce(function(p, key) {
+            return p.then(function() { return req2p(entriesStore.delete(key)); });
+          }, Promise.resolve());
+        });
+      });
+    }
+
+    function getEntriesForHabit(habitId) {
+      return openDB().then(function() {
+        return req2p(tx('entries').objectStore('entries').index('habitId').getAll(habitId));
+      }).then(function(all) {
+        var map = {};
+        all.forEach(function(e) { map[e.date] = e.status; });
+        return map;
+      });
+    }
+
+    function setEntry(habitId, date, status) {
+      return openDB().then(function() {
+        var store = tx('entries', 'readwrite').objectStore('entries');
+        if (status === 'not_entered') return req2p(store.delete([habitId, date]));
+        return req2p(store.put({ habitId: habitId, date: date, status: status }));
+      });
+    }
+
+    function getMeta(key) {
+      return openDB().then(function() {
+        return req2p(tx('meta').objectStore('meta').get(key));
+      }).then(function(r) {
+        return r ? r.value : undefined;
+      });
+    }
+
+    function setMeta(key, value) {
+      return openDB().then(function() {
+        return req2p(tx('meta', 'readwrite').objectStore('meta').put({ key: key, value: value }));
+      });
+    }
+
+    function getAvailableYears() {
+      return openDB().then(function() {
+        return req2p(tx('entries').objectStore('entries').getAllKeys());
+      }).then(function(keys) {
+        var years = new Set(keys.map(function(k) { return parseInt(k[1].slice(0, 4)); }));
+        return Array.from(years).sort(function(a, b) { return a - b; });
+      });
+    }
+
+    function exportAllData() {
+      return getHabits().then(function(habits) {
+        return habits.reduce(function(p, habit) {
+          return p.then(function(acc) {
+            return getEntriesForHabit(habit.id).then(function(entries) {
+              acc.push(Object.assign({}, habit, { entries: entries }));
+              return acc;
+            });
+          });
+        }, Promise.resolve([]));
+      });
+    }
+
+    function importAllData(habits) {
+      return openDB().then(function() {
+        var t = _db.transaction(['habits', 'entries'], 'readwrite');
+        return req2p(t.objectStore('habits').clear()).then(function() {
+          return req2p(t.objectStore('entries').clear());
+        }).then(function() {
+          return habits.reduce(function(p, h) {
+            return p.then(function() {
+              var entries = h.entries || {};
+              var habitData = Object.assign({}, h);
+              delete habitData.entries;
+              return req2p(t.objectStore('habits').put(habitData)).then(function() {
+                var dates = Object.keys(entries);
+                return dates.reduce(function(p2, date) {
+                  return p2.then(function() {
+                    if (entries[date] !== 'not_entered') {
+                      return req2p(t.objectStore('entries').put({
+                        habitId: h.id, date: date, status: entries[date]
+                      }));
+                    }
+                  });
+                }, Promise.resolve());
+              });
+            });
+          }, Promise.resolve());
+        });
+      });
+    }
+
+    // ── React setup ──────────────────────────────────────────────────────────
+
+    var h = React.createElement;
+    var useState = React.useState;
+    var useEffect = React.useEffect;
+    var useRef = React.useRef;
+    var createRoot = ReactDOM.createRoot;
+    var html = htm.bind(h);
+
+    // ── Constants ────────────────────────────────────────────────────────────
+
+    var STATUS_CONFIG = {
+      excellent:   { label: 'Excellent',   color: '#16a34a', text: '#fff',    emoji: '🙂' },
+      good:        { label: 'Good',        color: '#86efac', text: '#166534', emoji: '' },
+      not_great:   { label: 'Not great',   color: '#fde047', text: '#854d0e', emoji: '' },
+      bad:         { label: 'Bad',         color: '#ef4444', text: '#fff',    emoji: '' },
+      not_entered: { label: 'Not entered', color: '#e5e7eb', text: '#6b7280', emoji: '' },
+    };
+    var STATUSES = ['excellent', 'good', 'not_great', 'bad', 'not_entered'];
+    var WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    var FLOOR_YEAR = 2026;
+    var FLOOR_MONTH = 3;
+
+    // ── Utils ────────────────────────────────────────────────────────────────
+
+    function toDateStr(date) {
+      var y = date.getFullYear();
+      var m = String(date.getMonth() + 1).padStart(2, '0');
+      var d = String(date.getDate()).padStart(2, '0');
+      return y + '-' + m + '-' + d;
+    }
+
+    function getTodayStr() { return toDateStr(new Date()); }
+
+    function getEditableSet() {
+      var today = new Date();
+      var set = new Set();
+      for (var i = 0; i < 7; i++) {
+        var d = new Date(today);
+        d.setDate(d.getDate() - i);
+        set.add(toDateStr(d));
+      }
+      return set;
+    }
+
+    function formatFull(dateStr) {
+      var parts = dateStr.split('-').map(Number);
+      return new Date(parts[0], parts[1] - 1, parts[2]).toLocaleDateString('en-US', {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      });
+    }
+
+    function monthOffset(year, month) {
+      return (new Date(year, month, 1).getDay() + 6) % 7;
+    }
+
+    function daysIn(year, month) {
+      return new Date(year, month + 1, 0).getDate();
+    }
+
+    var _toastId = 0;
+
+    // ── ToastContainer ───────────────────────────────────────────────────────
+
+    function ToastContainer(props) {
+      return html`
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex flex-col gap-2 z-50 w-full max-w-sm px-4 pointer-events-none">
+          ${props.toasts.map(function(t) { return html`
+            <div key=${t.id} className="bg-gray-800 text-white rounded-xl px-4 py-3 text-sm shadow-lg flex items-center justify-between pointer-events-auto">
+              <span>${t.msg}</span>
+              <button onClick=${function() { props.onRemove(t.id); }} className="ml-3 text-gray-400 hover:text-white text-lg leading-none">✕</button>
+            </div>
+          `; })}
+        </div>
+      `;
+    }
+
+    // ── StatusModal ──────────────────────────────────────────────────────────
+
+    function StatusModal(props) {
+      return html`
+        <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-40 p-4"
+             onClick=${function(e) { if (e.target === e.currentTarget) props.onClose(); }}>
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden">
+            <div className="flex justify-between items-start p-4 pb-2">
+              <div>
+                <div className="font-semibold text-gray-900 text-base">${formatFull(props.date)}</div>
+                <div className="text-sm text-gray-500 mt-0.5">${props.habitName}</div>
+              </div>
+              <button onClick=${props.onClose} className="text-gray-400 hover:text-gray-700 text-2xl leading-none ml-3 mt-0.5" aria-label="Close">✕</button>
+            </div>
+            <div className="px-4 pb-4 pt-2 flex flex-col gap-2">
+              ${STATUSES.map(function(status) {
+                var cfg = STATUS_CONFIG[status];
+                var selected = (props.currentStatus || 'not_entered') === status;
+                return html`
+                  <button key=${status}
+                    onClick=${function() { props.onSave(status); }}
+                    className="w-full py-3.5 px-4 rounded-xl text-left font-medium flex items-center justify-between"
+                    style=${{ backgroundColor: cfg.color, color: cfg.text, outline: selected ? '2.5px solid #111827' : 'none', outlineOffset: '2px' }}>
+                    <span>${cfg.emoji ? cfg.emoji + ' ' : ''}${cfg.label}</span>
+                    ${selected ? html`<span className="font-bold">✓</span>` : null}
+                  </button>
+                `;
+              })}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // ── MonthGrid ────────────────────────────────────────────────────────────
+
+    function MonthGrid(props) {
+      var offset = monthOffset(props.year, props.month);
+      var count = daysIn(props.year, props.month);
+      var label = new Date(props.year, props.month, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      var cells = [];
+      for (var i = 0; i < offset; i++) cells.push(null);
+      for (var d = 1; d <= count; d++) cells.push(d);
+      while (cells.length % 7 !== 0) cells.push(null);
+
+      return html`
+        <div id=${'month-' + props.year + '-' + props.month} className="mb-8">
+          <h2 className="font-semibold text-gray-700 mb-2">${label}</h2>
+          <div className="grid grid-cols-7 rounded-xl overflow-hidden border border-gray-200 gap-px bg-gray-200">
+            ${WEEKDAYS.map(function(w) { return html`
+              <div key=${w} className="bg-white text-center text-xs text-gray-400 font-medium py-1.5">${w}</div>
+            `; })}
+            ${cells.map(function(day, i) {
+              if (!day) return html`<div key=${'e'+i} className="bg-white" style=${{ aspectRatio: '1' }} />`;
+              var dateStr = props.year + '-' + String(props.month + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+              var status = props.entries[dateStr] || 'not_entered';
+              var cfg = STATUS_CONFIG[status];
+              var isToday = dateStr === props.today;
+              var isEditable = props.editable.has(dateStr);
+              return html`
+                <div key=${day}
+                  style=${{ backgroundColor: cfg.color, aspectRatio: '1', boxShadow: isToday ? 'inset 0 0 0 2px #111827' : undefined, cursor: 'pointer' }}
+                  className="flex flex-col items-center justify-center select-none"
+                  onClick=${function() { props.onDayClick(dateStr, isEditable); }}
+                  role="button" tabIndex=${isEditable ? 0 : -1}
+                  aria-label=${dateStr + ' ' + cfg.label}>
+                  <span className="text-xs font-semibold leading-none" style=${{ color: cfg.text }}>${day}</span>
+                  ${cfg.emoji ? html`<span className="text-base leading-none mt-0.5">${cfg.emoji}</span>` : null}
+                </div>
+              `;
+            })}
+          </div>
+        </div>
+      `;
+    }
+
+    // ── CalendarView ─────────────────────────────────────────────────────────
+
+    function CalendarView(props) {
+      var today = getTodayStr();
+      var editable = getEditableSet();
+      var now = new Date();
+      var curYear = now.getFullYear();
+      var curMonth = now.getMonth();
+      var startMonth = props.selectedYear > FLOOR_YEAR ? 0 : FLOOR_MONTH;
+      var endMonth = props.selectedYear === curYear ? curMonth : 11;
+
+      if (props.selectedYear < FLOOR_YEAR || endMonth < startMonth) {
+        return html`<div className="px-4 py-16 text-center text-gray-400 text-sm">No data available for ${props.selectedYear}.</div>`;
+      }
+
+      var months = [];
+      for (var m = endMonth; m >= startMonth; m--) {
+        months.push({ year: props.selectedYear, month: m });
+      }
+
+      return html`
+        <div className="px-4 pb-12">
+          ${months.map(function(item) { return html`
+            <${MonthGrid} key=${item.year + '-' + item.month}
+              year=${item.year} month=${item.month}
+              entries=${props.entries} editable=${editable}
+              today=${today} onDayClick=${props.onDayClick} />
+          `; })}
+        </div>
+      `;
+    }
+
+    // ── HabitTabs ────────────────────────────────────────────────────────────
+
+    function HabitTabs(props) {
+      return html`
+        <div className="flex gap-1.5 px-3 py-2 overflow-x-auto no-scrollbar border-b border-gray-200 bg-white">
+          ${props.habits.map(function(habit) { return html`
+            <button key=${habit.id}
+              onClick=${function() { props.onSelect(habit.id); }}
+              style=${{ maxWidth: '9rem' }}
+              className=${'flex-shrink-0 px-3 py-1.5 rounded-full text-sm font-medium transition-colors ' +
+                (habit.id === props.activeId ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}>
+              <span className="block truncate">${habit.name}</span>
+            </button>
+          `; })}
+        </div>
+      `;
+    }
+
+    // ── ManagementView ───────────────────────────────────────────────────────
+
+    function ManagementView(props) {
+      var _s = useState('');   var addName = _s[0]; var setAddName = _s[1];
+      var _r = useState(null); var renamingId = _r[0]; var setRenamingId = _r[1];
+      var _rv = useState('');  var renameVal = _rv[0]; var setRenameVal = _rv[1];
+      var _dt = useState(null); var deleteTarget = _dt[0]; var setDeleteTarget = _dt[1];
+      var _id = useState(null); var importData = _id[0]; var setImportData = _id[1];
+      var fileRef = useRef(null);
+      var atCap = props.habits.length >= 5;
+
+      function add() {
+        var name = addName.trim();
+        if (!name) return;
+        if (name.length > 40) { props.toast('Name must be 40 characters or fewer'); return; }
+        var habit = { id: crypto.randomUUID(), name: name, createdAt: new Date().toISOString(), order: props.habits.length };
+        saveHabit(habit).then(function() { setAddName(''); props.onChange(habit.id); });
+      }
+
+      function rename(id) {
+        var name = renameVal.trim();
+        if (!name) return;
+        if (name.length > 40) { props.toast('Name must be 40 characters or fewer'); return; }
+        var habit = props.habits.find(function(h) { return h.id === id; });
+        saveHabit(Object.assign({}, habit, { name: name })).then(function() { setRenamingId(null); props.onChange(null); });
+      }
+
+      function doDelete(id) {
+        deleteHabit(id).then(function() {
+          var rest = props.habits.filter(function(h) { return h.id !== id; });
+          return rest.reduce(function(p, h, i) {
+            return p.then(function() { return saveHabit(Object.assign({}, h, { order: i })); });
+          }, Promise.resolve()).then(function() {
+            setDeleteTarget(null);
+            props.onChange(rest.length > 0 ? rest[0].id : null);
+          });
+        });
+      }
+
+      function reorder(id, dir) {
+        var idx = props.habits.findIndex(function(h) { return h.id === id; });
+        var next = idx + dir;
+        if (next < 0 || next >= props.habits.length) return;
+        var reordered = props.habits.slice();
+        var tmp = reordered[idx]; reordered[idx] = reordered[next]; reordered[next] = tmp;
+        reordered.reduce(function(p, h, i) {
+          return p.then(function() { return saveHabit(Object.assign({}, h, { order: i })); });
+        }, Promise.resolve()).then(function() { props.onChange(null); });
+      }
+
+      function pickFile(e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        var reader = new FileReader();
+        reader.onload = function(ev) {
+          try {
+            var data = JSON.parse(ev.target.result);
+            if (data.app !== 'daily-habits') throw new Error('Not a Daily Habits export file.');
+            if (data.version !== 1) throw new Error('Unsupported version ' + data.version + '. Expected version 1.');
+            setImportData(data);
+          } catch (err) { props.toast('Import failed: ' + err.message); }
+        };
+        reader.readAsText(file);
+        e.target.value = '';
+      }
+
+      return html`
+        <div className="fixed inset-0 bg-white z-30 overflow-y-auto">
+          <div className="max-w-[480px] mx-auto pb-8">
+            <div className="sticky top-0 bg-white border-b border-gray-200 px-4 h-14 flex items-center justify-between z-10">
+              <h1 className="text-lg font-semibold text-gray-900">Manage Habits</h1>
+              <button onClick=${props.onClose} className="text-green-600 font-semibold text-sm">Done</button>
+            </div>
+            <div className="px-4 pt-4">
+              ${props.habits.length === 0
+                ? html`<p className="text-gray-400 text-sm text-center py-6">No habits yet.</p>`
+                : props.habits.map(function(habit, idx) { return html`
+                  <div key=${habit.id} className="flex items-center gap-2 py-2.5 border-b border-gray-100">
+                    ${renamingId === habit.id
+                      ? html`
+                        <input className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
+                          value=${renameVal} maxLength=${40}
+                          onChange=${function(e) { setRenameVal(e.target.value); }}
+                          onKeyDown=${function(e) { if (e.key==='Enter') rename(habit.id); if (e.key==='Escape') setRenamingId(null); }}
+                          autoFocus />
+                        <button onClick=${function() { rename(habit.id); }} className="text-green-600 font-medium text-sm px-1">Save</button>
+                        <button onClick=${function() { setRenamingId(null); }} className="text-gray-400 text-sm px-1">Cancel</button>
+                      `
+                      : html`
+                        <span className="flex-1 text-sm font-medium text-gray-900 truncate">${habit.name}</span>
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          <button onClick=${function() { reorder(habit.id, -1); }} disabled=${idx === 0}
+                            className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-25">↑</button>
+                          <button onClick=${function() { reorder(habit.id, 1); }} disabled=${idx === props.habits.length - 1}
+                            className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-25">↓</button>
+                          <button onClick=${function() { setRenamingId(habit.id); setRenameVal(habit.name); }}
+                            className="px-2 h-8 text-xs text-gray-600 hover:bg-gray-100 rounded-lg">Rename</button>
+                          <button onClick=${function() { setDeleteTarget(habit); }}
+                            className="px-2 h-8 text-xs text-red-600 hover:bg-red-50 rounded-lg">Delete</button>
+                        </div>
+                      `}
+                  </div>
+                `; })
+              }
+              <div className="mt-4">
+                ${atCap
+                  ? html`<p className="text-xs text-gray-400 text-center py-2">Maximum 5 habits reached.</p>`
+                  : html`
+                    <div className="flex gap-2">
+                      <input className="flex-1 border border-gray-300 rounded-xl px-3 py-2.5 text-sm"
+                        placeholder="New habit name…" value=${addName} maxLength=${40}
+                        onChange=${function(e) { setAddName(e.target.value); }}
+                        onKeyDown=${function(e) { if (e.key === 'Enter') add(); }} />
+                      <button onClick=${add} disabled=${!addName.trim()}
+                        className="px-4 py-2.5 bg-green-600 text-white text-sm font-medium rounded-xl disabled:opacity-40 hover:bg-green-700">Add</button>
+                    </div>
+                  `}
+              </div>
+              <div className="mt-8">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Data</p>
+                <button onClick=${props.onExport} className="w-full py-3 px-4 bg-gray-50 hover:bg-gray-100 text-gray-700 text-sm font-medium rounded-xl text-left mb-2">📤 Export data</button>
+                <button onClick=${function() { fileRef.current && fileRef.current.click(); }} className="w-full py-3 px-4 bg-gray-50 hover:bg-gray-100 text-gray-700 text-sm font-medium rounded-xl text-left">📥 Import data</button>
+                <input ref=${fileRef} type="file" accept=".json" className="hidden" onChange=${pickFile} />
+              </div>
+            </div>
+          </div>
+
+          ${deleteTarget ? html`
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+                <h3 className="font-semibold text-gray-900 mb-2">Delete habit</h3>
+                <p className="text-sm text-gray-600 mb-5">Delete "${deleteTarget.name}" and all its history? This cannot be undone.</p>
+                <div className="flex gap-3 justify-end">
+                  <button onClick=${function() { setDeleteTarget(null); }} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-xl">Cancel</button>
+                  <button onClick=${function() { doDelete(deleteTarget.id); }} className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded-xl font-medium">Delete</button>
+                </div>
+              </div>
+            </div>
+          ` : null}
+
+          ${importData ? html`
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+                <h3 className="font-semibold text-gray-900 mb-2">Import data</h3>
+                <p className="text-sm text-gray-600 mb-5">Import will replace all current habits and history. Continue?</p>
+                <div className="flex gap-3 justify-end">
+                  <button onClick=${function() { setImportData(null); }} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-xl">Cancel</button>
+                  <button onClick=${function() { props.onImport(importData).then(function() { setImportData(null); }); }} className="px-4 py-2 text-sm text-white bg-green-600 hover:bg-green-700 rounded-xl font-medium">Import</button>
+                </div>
+              </div>
+            </div>
+          ` : null}
+        </div>
+      `;
+    }
+
+    // ── BackupBanner ─────────────────────────────────────────────────────────
+
+    function BackupBanner(props) {
+      return html`
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 flex items-center gap-3">
+          <p className="text-sm text-amber-800 flex-1">Backup reminder: export your data to keep it safe.</p>
+          <button onClick=${props.onExport} className="text-xs font-semibold text-amber-900 underline whitespace-nowrap">Export now</button>
+          <button onClick=${props.onDismiss} className="text-xs text-amber-600 whitespace-nowrap ml-1">Later</button>
+        </div>
+      `;
+    }
+
+    // ── App ──────────────────────────────────────────────────────────────────
+
+    function App() {
+      var now = new Date();
+      var curYear = now.getFullYear();
+
+      var _h = useState([]); var habits = _h[0]; var setHabits = _h[1];
+      var _ai = useState(null); var activeId = _ai[0]; var setActiveId = _ai[1];
+      var _e = useState({}); var entries = _e[0]; var setEntries = _e[1];
+      var _m = useState(false); var showMgmt = _m[0]; var setShowMgmt = _m[1];
+      var _mo = useState(null); var modal = _mo[0]; var setModal = _mo[1];
+      var _t = useState([]); var toasts = _t[0]; var setToasts = _t[1];
+      var _b = useState(false); var showBackup = _b[0]; var setShowBackup = _b[1];
+      var _de = useState(false); var dbError = _de[0]; var setDbError = _de[1];
+      var _ay = useState([]); var availableYears = _ay[0]; var setAvailableYears = _ay[1];
+      var _sy = useState(curYear); var selectedYear = _sy[0]; var setSelectedYear = _sy[1];
+
+      function toast(msg) {
+        var id = ++_toastId;
+        setToasts(function(t) { return t.concat([{ id: id, msg: msg }]); });
+        setTimeout(function() { setToasts(function(t) { return t.filter(function(x) { return x.id !== id; }); }); }, 3500);
+      }
+
+      function loadHabits(forceId) {
+        return getHabits().then(function(h) {
+          setHabits(h);
+          setActiveId(function(prev) {
+            if (forceId !== undefined) {
+              return (forceId && h.find(function(x) { return x.id === forceId; })) ? forceId : (h.length > 0 ? h[0].id : null);
+            }
+            return (prev && h.find(function(x) { return x.id === prev; })) ? prev : (h.length > 0 ? h[0].id : null);
+          });
+          return h;
+        }).catch(function() { setDbError(true); return []; });
+      }
+
+      function loadEntries(id) {
+        if (!id) { setEntries({}); return; }
+        getEntriesForHabit(id).then(function(e) { setEntries(e); }).catch(function() { setEntries({}); });
+      }
+
+      function refreshYears() {
+        getAvailableYears().then(function(years) { setAvailableYears(years); }).catch(function() {});
+      }
+
+      useEffect(function() {
+        loadHabits().then(function() {
+          refreshYears();
+          getMeta('lastExportPromptAt').then(function(last) {
+            if (!last || Date.now() - new Date(last).getTime() > 7 * 864e5) setShowBackup(true);
+          }).catch(function() {});
+        });
+      }, []);
+
+      useEffect(function() { loadEntries(activeId); }, [activeId]);
+
+      function handleDayClick(dateStr, isEditable) {
+        if (!isEditable) { toast('Only the last 7 days can be edited'); return; }
+        setModal({ date: dateStr });
+      }
+
+      function handleStatusSave(status) {
+        if (!modal || !activeId) return;
+        setEntry(activeId, modal.date, status).then(function() {
+          if (status === 'not_entered') {
+            setEntries(function(prev) { var n = Object.assign({}, prev); delete n[modal.date]; return n; });
+          } else {
+            setEntries(function(prev) { return Object.assign({}, prev, { [modal.date]: status }); });
+          }
+          refreshYears();
+        }).catch(function() { toast('Failed to save. Please try again.'); });
+        setModal(null);
+      }
+
+      function doExport() {
+        return exportAllData().then(function(data) {
+          var dateStr = new Date().toISOString().slice(0, 10);
+          var payload = { app: 'daily-habits', version: 1, exportedAt: new Date().toISOString(), habits: data };
+          var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url; a.download = 'daily-habits-export-' + dateStr + '.json'; a.click();
+          URL.revokeObjectURL(url);
+          setMeta('lastExportPromptAt', new Date().toISOString()).catch(function() {});
+          setShowBackup(false);
+          toast('Data exported successfully');
+        }).catch(function() { toast('Export failed. Please try again.'); });
+      }
+
+      function doImport(data) {
+        return importAllData(data.habits).then(function() {
+          return getHabits().then(function(h) {
+            setHabits(h);
+            var first = h.length > 0 ? h[0].id : null;
+            setActiveId(first);
+            loadEntries(first);
+            refreshYears();
+            setShowMgmt(false);
+            toast('Data imported successfully');
+          });
+        }).catch(function() { toast('Import failed. Please try again.'); });
+      }
+
+      var activeHabit = habits.find(function(h) { return h.id === activeId; });
+      var dropdownYears = Array.from(new Set([curYear].concat(availableYears.filter(function(y) { return y >= FLOOR_YEAR; })))).sort(function(a, b) { return b - a; });
+
+      return html`
+        <div className="max-w-[480px] mx-auto bg-white min-h-screen">
+          ${dbError ? html`<div className="bg-yellow-50 border-b border-yellow-200 px-4 py-2 text-sm text-yellow-800">Storage unavailable; your data will not persist.</div>` : null}
+          ${showBackup ? html`<${BackupBanner}
+            onExport=${function() { doExport().then(function() { setShowBackup(false); }); }}
+            onDismiss=${function() { setShowBackup(false); setMeta('lastExportPromptAt', new Date().toISOString()).catch(function() {}); }} />` : null}
+
+          <div className="sticky top-0 z-20 bg-white border-b border-gray-200 shadow-sm">
+            <div className="flex items-center justify-between px-4 h-14">
+              <h1 className="text-lg font-bold text-gray-900">Daily Habits</h1>
+              <div className="flex items-center gap-2">
+                <select onChange=${function(e) { setSelectedYear(parseInt(e.target.value)); }}
+                  value=${selectedYear}
+                  className="text-sm border border-gray-200 rounded-lg px-2 py-1.5 text-gray-700 bg-white"
+                  aria-label="Select year">
+                  ${dropdownYears.map(function(y) { return html`<option key=${y} value=${y}>${y}</option>`; })}
+                </select>
+                <button onClick=${function() { setShowMgmt(true); }}
+                  className="w-9 h-9 flex items-center justify-center rounded-lg hover:bg-gray-100 text-lg"
+                  aria-label="Manage habits">☰</button>
+              </div>
+            </div>
+            ${habits.length > 0 ? html`<${HabitTabs} habits=${habits} activeId=${activeId} onSelect=${setActiveId} />` : null}
+          </div>
+
+          ${habits.length === 0
+            ? html`
+              <div className="flex flex-col items-center justify-center px-8 py-24 text-center">
+                <p className="text-gray-500 mb-5 text-base">No habits yet. Add your first habit to get started.</p>
+                <button onClick=${function() { setShowMgmt(true); }}
+                  className="px-6 py-3 bg-green-600 text-white font-semibold rounded-2xl hover:bg-green-700 text-base">Add habit</button>
+              </div>
+            `
+            : html`<${CalendarView} entries=${entries} onDayClick=${handleDayClick} selectedYear=${selectedYear} />`
+          }
+
+          ${modal && activeHabit ? html`
+            <${StatusModal} date=${modal.date}
+              currentStatus=${entries[modal.date] || 'not_entered'}
+              habitName=${activeHabit.name}
+              onSave=${handleStatusSave}
+              onClose=${function() { setModal(null); }} />
+          ` : null}
+
+          ${showMgmt ? html`
+            <${ManagementView} habits=${habits}
+              onClose=${function() { setShowMgmt(false); }}
+              onChange=${function(id) { loadHabits(id).then(refreshYears); }}
+              onExport=${doExport}
+              onImport=${doImport}
+              toast=${toast} />
+          ` : null}
+
+          <${ToastContainer} toasts=${toasts} onRemove=${function(id) { setToasts(function(t) { return t.filter(function(x) { return x.id !== id; }); }); }} />
+        </div>
+      `;
+    }
+
+    createRoot(document.getElementById('root')).render(html`<${App} />`);
+  })();
+  </script>
 </body>
 </html>
