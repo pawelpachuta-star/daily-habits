@@ -1,4 +1,4 @@
-const CACHE = 'daily-habits-v1';
+const CACHE = 'daily-habits-v2';
 const SHELL = [
   './index.html',
   './manifest.json',
