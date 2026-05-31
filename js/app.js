@@ -440,6 +440,10 @@ function BackupBanner({ onExport, onDismiss }) {
 // ── App ───────────────────────────────────────────────────────────────────────
 
 function App() {
+  const now = new Date();
+  const curYear = now.getFullYear();
+  const curMonth = now.getMonth();
+
   const [habits, setHabits] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [entries, setEntries] = useState({});
@@ -450,10 +454,6 @@ function App() {
   const [dbError, setDbError] = useState(false);
   const [availableYears, setAvailableYears] = useState([]);
   const [selectedYear, setSelectedYear] = useState(curYear);
-
-  const now = new Date();
-  const curYear = now.getFullYear();
-  const curMonth = now.getMonth();
 
   function toast(msg) {
     const id = ++_toastId;
