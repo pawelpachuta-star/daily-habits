@@ -56,7 +56,6 @@ function daysIn(year, month) {
 }
 
 let _toastId = 0;
-let _scrollId = 0;
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 
@@ -174,44 +173,30 @@ function MonthGrid({ year, month, entries, editable, today, onDayClick }) {
 
 // ── CalendarView ──────────────────────────────────────────────────────────────
 
-function CalendarView({ entries, onDayClick, scrollTarget }) {
-  const [monthsShown, setMonthsShown] = useState(2);
-  const sentinel = useRef(null);
+const FLOOR_YEAR = 2026;
+const FLOOR_MONTH = 3; // April (0-indexed)
+
+function CalendarView({ entries, onDayClick, selectedYear }) {
   const today = getTodayStr();
   const editable = getEditableSet();
   const now = new Date();
-  const cy = now.getFullYear();
-  const cm = now.getMonth();
-  const lastTargetId = useRef(null);
+  const curYear = now.getFullYear();
+  const curMonth = now.getMonth();
 
-  useEffect(() => {
-    const obs = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) setMonthsShown(n => n + 3);
-    }, { rootMargin: '300px' });
-    if (sentinel.current) obs.observe(sentinel.current);
-    return () => obs.disconnect();
-  }, []);
+  const startMonth = selectedYear > FLOOR_YEAR ? 0 : FLOOR_MONTH;
+  const endMonth = selectedYear === curYear ? curMonth : 11;
 
-  useEffect(() => {
-    if (!scrollTarget || scrollTarget.id === lastTargetId.current) return;
-    lastTargetId.current = scrollTarget.id;
-    const { year, month, needed } = scrollTarget;
-    const doScroll = () => {
-      document.getElementById(`month-${year}-${month}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    };
-    if (needed > monthsShown) {
-      setMonthsShown(needed);
-      setTimeout(doScroll, 80);
-    } else {
-      doScroll();
-    }
-  }, [scrollTarget]);
+  if (selectedYear < FLOOR_YEAR || endMonth < startMonth) {
+    return html`
+      <div className="px-4 py-16 text-center text-gray-400 text-sm">
+        No data available for ${selectedYear}.
+      </div>
+    `;
+  }
 
   const months = [];
-  for (let i = 0; i < monthsShown; i++) {
-    let m = cm - i, y = cy;
-    while (m < 0) { m += 12; y--; }
-    months.push({ year: y, month: m });
+  for (let m = endMonth; m >= startMonth; m--) {
+    months.push({ year: selectedYear, month: m });
   }
 
   return html`
@@ -227,7 +212,6 @@ function CalendarView({ entries, onDayClick, scrollTarget }) {
           onDayClick=${onDayClick}
         />
       `)}
-      <div ref=${sentinel} className="h-1" />
     </div>
   `;
 }
@@ -465,7 +449,7 @@ function App() {
   const [showBackup, setShowBackup] = useState(false);
   const [dbError, setDbError] = useState(false);
   const [availableYears, setAvailableYears] = useState([]);
-  const [scrollTarget, setScrollTarget] = useState(null);
+  const [selectedYear, setSelectedYear] = useState(curYear);
 
   const now = new Date();
   const curYear = now.getFullYear();
@@ -570,16 +554,11 @@ function App() {
   }
 
   function handleYearSelect(year) {
-    const isCurrentYear = year === curYear;
-    const targetY = year;
-    const targetM = isCurrentYear ? curMonth : 11;
-    const diff = (curYear - targetY) * 12 + (curMonth - targetM);
-    const needed = Math.max(2, diff + 1);
-    setScrollTarget({ year: targetY, month: targetM, needed, id: ++_scrollId });
+    setSelectedYear(year);
   }
 
   const activeHabit = habits.find(h => h.id === activeId);
-  const dropdownYears = [...new Set([curYear, curYear - 1, ...availableYears])].sort((a, b) => b - a);
+  const dropdownYears = [...new Set([curYear, ...availableYears.filter(y => y >= FLOOR_YEAR)])].sort((a, b) => b - a);
 
   return html`
     <div className="max-w-[480px] mx-auto bg-white min-h-screen">
@@ -604,7 +583,7 @@ function App() {
           <div className="flex items-center gap-2">
             <select
               onChange=${e => handleYearSelect(parseInt(e.target.value))}
-              defaultValue=${curYear}
+              value=${selectedYear}
               className="text-sm border border-gray-200 rounded-lg px-2 py-1.5 text-gray-700 bg-white"
               aria-label="Jump to year"
             >
@@ -636,7 +615,7 @@ function App() {
           <${CalendarView}
             entries=${entries}
             onDayClick=${handleDayClick}
-            scrollTarget=${scrollTarget}
+            selectedYear=${selectedYear}
           />
         `
       }
